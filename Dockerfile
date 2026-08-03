@@ -16,6 +16,13 @@ RUN npm ci
 # forwards them from .env.local). Server-only secrets (service role
 # key, ENCRYPTION_KEY, META_APP_SECRET, ...) are read at runtime and
 # must NOT be baked into the image.
+#
+# EasyPanel: in the service's "Build" tab, add each NEXT_PUBLIC_*
+# variable and tick "available at build time" (or add it under
+# Build Args, depending on version) so EasyPanel forwards it as
+# `--build-arg NAME=value` — the ARG names below must match exactly.
+# Anything not marked build-time only reaches the container at
+# runtime and won't be inlined into the client bundle.
 # ---------------------------------------------------------------
 FROM node:20-alpine AS builder
 WORKDIR /app
@@ -25,10 +32,12 @@ COPY . .
 ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
 ARG NEXT_PUBLIC_SITE_URL
+ARG NEXT_PUBLIC_APP_URL
 ARG NEXT_PUBLIC_APP_LOCALE=en
 ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
     NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY \
     NEXT_PUBLIC_SITE_URL=$NEXT_PUBLIC_SITE_URL \
+    NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
     NEXT_PUBLIC_APP_LOCALE=$NEXT_PUBLIC_APP_LOCALE \
     NEXT_TELEMETRY_DISABLED=1
 
@@ -52,4 +61,12 @@ COPY --from=builder --chown=nextjs:nextjs /app/public ./public
 
 USER nextjs
 EXPOSE 3000
+
+# EasyPanel reads this natively to drive its service health indicator
+# and zero-downtime deploys (waits for "healthy" before routing
+# traffic to a new container). Uses `node`, not curl/wget, since
+# neither is installed on node:alpine.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["node", "-e", "fetch('http://localhost:'+(process.env.PORT||3000)).then((r)=>process.exit(r.ok||r.status<500?0:1)).catch(()=>process.exit(1))"]
+
 CMD ["node", "server.js"]
