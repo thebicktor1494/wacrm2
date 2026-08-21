@@ -37,109 +37,129 @@ import { supabaseAdmin } from '@/lib/sso/admin-client'
 //     that's already there. Invite each Innova agent who needs WhatsApp
 //     access as a wacrm user (Settings → Members) using their Innova email.
 const ALLOWED_DEST_PREFIXES = [
-  '/inbox',
-  '/contacts',
-  '/pipelines',
-  '/broadcasts',
-  '/automations',
-  '/agents',
-]
+    '/inbox',
+    '/contacts',
+    '/pipelines',
+    '/broadcasts',
+    '/automations',
+    '/agents',
+  ]
 
 function isAllowedDest(dest: string): boolean {
-  return ALLOWED_DEST_PREFIXES.some(
-    (p) => dest === p || dest.startsWith(p + '/')
-  )
+    return ALLOWED_DEST_PREFIXES.some(
+          (p) => dest === p || dest.startsWith(p + '/')
+        )
 }
 
 function safeEqual(a: string, b: string): boolean {
-  const bufA = Buffer.from(a)
-  const bufB = Buffer.from(b)
-  if (bufA.length !== bufB.length) return false
-  return timingSafeEqual(bufA, bufB)
+    const bufA = Buffer.from(a)
+    const bufB = Buffer.from(b)
+    if (bufA.length !== bufB.length) return false
+    return timingSafeEqual(bufA, bufB)
 }
 
 export async function GET(request: NextRequest) {
-  const url = request.nextUrl
-  const email = url.searchParams.get('email') || ''
-  const dest = url.searchParams.get('dest') || ''
-  const exp = url.searchParams.get('exp') || ''
-  const sig = url.searchParams.get('sig') || ''
+    const url = request.nextUrl
+    const email = url.searchParams.get('email') || ''
+    const dest = url.searchParams.get('dest') || ''
+    const exp = url.searchParams.get('exp') || ''
+    const sig = url.searchParams.get('sig') || ''
 
   const secret = process.env.INNOVA_API_TOKEN
-  if (!secret) {
-    return NextResponse.json(
-      { error: 'INNOVA_API_TOKEN no configurado en el entorno de wacrm' },
-      { status: 500 }
-    )
-  }
-  if (!email || !dest || !exp || !sig) {
-    return NextResponse.json({ error: 'Faltan parámetros' }, { status: 400 })
-  }
-  if (!isAllowedDest(dest)) {
-    return NextResponse.json({ error: 'dest no permitido' }, { status: 400 })
-  }
+    if (!secret) {
+          return NextResponse.json(
+            { error: 'INNOVA_API_TOKEN no configurado en el entorno de wacrm' },
+            { status: 500 }
+                )
+    }
+    if (!email || !dest || !exp || !sig) {
+          return NextResponse.json({ error: 'Faltan parámetros' }, { status: 400 })
+    }
+    if (!isAllowedDest(dest)) {
+          return NextResponse.json({ error: 'dest no permitido' }, { status: 400 })
+    }
 
   const expNum = parseInt(exp, 10)
-  if (!Number.isFinite(expNum) || Date.now() / 1000 > expNum) {
-    return NextResponse.json({ error: 'Enlace expirado' }, { status: 401 })
-  }
+    if (!Number.isFinite(expNum) || Date.now() / 1000 > expNum) {
+          return NextResponse.json({ error: 'Enlace expirado' }, { status: 401 })
+    }
 
   const expectedSig = createHmac('sha256', secret)
-    .update(`${email}|${dest}|${exp}`)
-    .digest('hex')
-  if (!safeEqual(sig, expectedSig)) {
-    return NextResponse.json({ error: 'Firma inválida' }, { status: 401 })
-  }
+      .update(`${email}|${dest}|${exp}`)
+      .digest('hex')
+    if (!safeEqual(sig, expectedSig)) {
+          return NextResponse.json({ error: 'Firma inválida' }, { status: 401 })
+    }
 
   // Mint + immediately redeem a magic-link token server-side (service
   // role) — no email is ever sent, this just establishes a session for an
   // account that must already exist.
   const admin = supabaseAdmin()
-  const { data: linkData, error: linkError } = await admin.auth.admin.generateLink(
-    { type: 'magiclink', email }
-  )
-  if (linkError || !linkData?.properties?.hashed_token) {
-    const notFound = linkError?.message?.toLowerCase().includes('not found')
-    return NextResponse.json(
-      {
-        error: notFound
-          ? `No existe una cuenta de wacrm con el correo ${email}. Invítalo desde Settings → Members con ese mismo correo.`
-          : (linkError?.message || 'No se pudo generar el enlace de acceso'),
-      },
-      { status: 404 }
-    )
-  }
+    const { data: linkData, error: linkError } = await admin.auth.admin.generateLink(
+      { type: 'magiclink', email }
+        )
+    if (linkError || !linkData?.properties?.hashed_token) {
+          const notFound = linkError?.message?.toLowerCase().includes('not found')
+          return NextResponse.json(
+            {
+                      error: notFound
+                        ? `No existe una cuenta de wacrm con el correo ${email}. Invítalo desde Settings → Members con ese mismo correo.`
+                                  : (linkError?.message || 'No se pudo generar el enlace de acceso'),
+            },
+            { status: 404 }
+                )
+    }
 
-  const redirectUrl = new URL(dest + '?embed=1', url.origin)
-  const response = NextResponse.redirect(redirectUrl)
+  // Build the redirect target's origin explicitly — don't trust
+  // `request.nextUrl.origin` / forwarded headers here. On this deployment
+  // (EasyPanel), neither carries the public domain through to the
+  // container (both resolve to the internal bind address, 0.0.0.0:80),
+  // so an inferred origin sends the browser nowhere.
+  //
+  // Deliberately NOT reusing `NEXT_PUBLIC_SITE_URL` here even though the
+  // invitations route (src/app/api/account/invitations/route.ts) uses it
+  // for the same "what's our public origin" problem: NEXT_PUBLIC_* vars
+  // get inlined into the bundle at `next build` time. On a host that
+  // builds the Docker image before env vars are available to the build
+  // step (only injecting them at container start), that inlines as
+  // `undefined` and no amount of setting it in the panel afterward fixes
+  // it without a rebuild at exactly the right moment. `SSO_PUBLIC_ORIGIN`
+  // is a plain server-only var — this file only runs on the server, so
+  // process.env is read fresh at request time, no build-time coupling.
+  const forwardedProto = request.headers.get('x-forwarded-proto') || 'https'
+    const forwardedHost = request.headers.get('x-forwarded-host') || request.headers.get('host')
+    const explicitOrigin = process.env.SSO_PUBLIC_ORIGIN?.trim().replace(/\/+$/, '')
+    const origin = explicitOrigin || (forwardedHost ? `${forwardedProto}://${forwardedHost}` : url.origin)
+    const redirectUrl = new URL(dest + '?embed=1', origin)
+    const response = NextResponse.redirect(redirectUrl)
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
-      cookies: {
-        getAll() {
-          return request.cookies.getAll()
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) =>
-            response.cookies.set(name, value, options)
-          )
-        },
-      },
+            cookies: {
+                      getAll() {
+                                  return request.cookies.getAll()
+                      },
+                      setAll(cookiesToSet) {
+                                  cookiesToSet.forEach(({ name, value, options }) =>
+                                                response.cookies.set(name, value, options)
+                                                                 )
+                      },
+            },
     }
-  )
+      )
 
   const { error: verifyError } = await supabase.auth.verifyOtp({
-    type: 'magiclink',
-    token_hash: linkData.properties.hashed_token,
+        type: 'magiclink',
+        token_hash: linkData.properties.hashed_token,
   })
-  if (verifyError) {
-    return NextResponse.json(
-      { error: verifyError.message || 'No se pudo iniciar sesión' },
-      { status: 401 }
-    )
-  }
+    if (verifyError) {
+          return NextResponse.json(
+            { error: verifyError.message || 'No se pudo iniciar sesión' },
+            { status: 401 }
+                )
+    }
 
   return response
 }
