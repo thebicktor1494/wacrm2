@@ -19,13 +19,34 @@ const withNextIntl = createNextIntlPlugin("./src/i18n/request.ts");
  *     deny them. A supply-chain compromise or a forgotten plugin
  *     can't silently opt back in.
  */
+// Who is allowed to embed this app in an <iframe>. Defaults to same-origin
+// only, plus the Innova CRM domain — Innova's "Bandeja de entrada" section
+// embeds individual wacrm routes (?embed=1) inside its own layout, so this
+// origin needs an explicit allowance. Override via env var if the domain
+// ever changes, without touching code.
+//
+// NOTE: the legacy `X-Frame-Options` header only supports DENY/SAMEORIGIN —
+// it cannot allow-list a specific cross-origin domain (ALLOW-FROM was
+// dropped by every modern browser). That's why it's gone from the list
+// below and replaced by an *enforced* CSP `frame-ancestors` directive,
+// which is what actually lets Innova iframe this app while still blocking
+// every other origin.
+const FRAME_ANCESTORS =
+  process.env.FRAME_ANCESTORS_ALLOWED ||
+  "'self' https://innovacreditos.mx https://www.innovacreditos.mx";
+
 const SECURITY_HEADERS = [
   {
     key: "Strict-Transport-Security",
     value: "max-age=63072000; includeSubDomains; preload",
   },
   { key: "X-Content-Type-Options", value: "nosniff" },
-  { key: "X-Frame-Options", value: "DENY" },
+  // Enforced (not report-only) — this is the header that actually allows
+  // Innova CRM to embed wacrm in an iframe while blocking everyone else.
+  {
+    key: "Content-Security-Policy",
+    value: `frame-ancestors ${FRAME_ANCESTORS};`,
+  },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   {
     // Microphone is allowed for same-origin (`self`) so the inbox
@@ -56,7 +77,9 @@ const SECURITY_HEADERS = [
       // Supabase REST + realtime (WSS). All Meta API calls happen
       // server-side, so graph.facebook.com does not belong here.
       "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
-      "frame-ancestors 'none'",
+      // Kept in sync with the enforced header above so the console
+      // doesn't show a contradicting report-only violation.
+      `frame-ancestors ${FRAME_ANCESTORS}`,
       "base-uri 'self'",
       "form-action 'self'",
     ].join("; "),
